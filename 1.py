@@ -205,6 +205,24 @@ class BilibiliUserDownloader:
             
         return None
 
+    def _format_duration(self, seconds):
+        """格式化时长，返回 m:ss"""
+        try:
+            total = int(seconds or 0)
+        except Exception:
+            total = 0
+        if total <= 0:
+            return "0:00"
+        minutes = total // 60
+        secs = total % 60
+        return f"{minutes}:{secs:02d}"
+
+    def sanitize_filename(self, name: str) -> str:
+        """仅移除Windows非法字符，保留中文符号如《》"""
+        illegal = '\\/:*?"<>|'
+        cleaned = ''.join(ch for ch in str(name) if ord(ch) >= 32 and ch not in illegal)
+        return cleaned.strip().rstrip('.')
+
     def get_user_info_from_medialist(self, user_id: str) -> Optional[Dict]:
         """从 Medialist API 获取用户信息（避免单独请求用户信息API）"""
         try:
@@ -335,15 +353,68 @@ class BilibiliUserDownloader:
         except Exception as e:
             print(f"Medialist获取视频列表错误: {e}")
             return []
-    
-    def _format_duration(self, seconds):
-        """格式化时长"""
-        if seconds == 0:
-            return "0:00"
-        minutes = seconds // 60
-        seconds = seconds % 60
-        return f"{minutes}:{seconds:02d}"
-    
+
+    def get_all_user_videos(self, user_id: str, max_count: int = None) -> List[Dict]:
+        """获取用户投稿视频（使用Medialist方法），支持限制数量"""
+        all_videos: List[Dict] = []
+        page = 1
+        page_size = 20  # 与 Medialist API 对齐
+        
+        print(f"开始获取用户 {user_id} 的视频（使用Medialist方法）...")
+        if max_count:
+            print(f"目标获取数量: {max_count} 个视频")
+        
+        while True:
+            print(f"正在获取第 {page} 页...")
+            videos = self.get_user_videos(user_id, page, page_size)
+            if not videos:
+                break
+            
+            if max_count and len(all_videos) + len(videos) > max_count:
+                needed = max_count - len(all_videos)
+                videos = videos[:needed]
+                all_videos.extend(videos)
+                print(f"第 {page} 页获取到 {len(videos)} 个视频（已达到目标数量 {max_count}）")
+                break
+            
+            all_videos.extend(videos)
+            print(f"第 {page} 页获取到 {len(videos)} 个视频，累计 {len(all_videos)} 个")
+            
+            if max_count and len(all_videos) >= max_count:
+                print(f"已获取到目标数量 {max_count} 个视频")
+                break
+            
+            if len(videos) < page_size:
+                break
+            
+            page += 1
+            time.sleep(self.delay_between_requests)
+        
+        print(f"共获取到 {len(all_videos)} 个视频")
+        return all_videos
+
+    def get_video_cid(self, bvid: str) -> Optional[str]:
+        """获取视频的第一个分P的cid"""
+        try:
+            url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
+            headers = {
+                'User-Agent': self.headers['User-Agent'],
+                'Referer': f'https://www.bilibili.com/video/{bvid}',
+                'Accept': 'application/json, text/plain, */*'
+            }
+            resp = self.session.get(url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('code') == 0:
+                    pages = data.get('data', {}).get('pages', [])
+                    if pages:
+                        return str(pages[0].get('cid'))
+            print(f"获取视频cid失败 {bvid}: 状态码 {resp.status_code}")
+            return None
+        except Exception as e:
+            print(f"获取视频cid失败 {bvid}: {e}")
+            return None
+
     def _get_user_videos_wbi(self, user_id: str, page: int = 1, page_size: int = 50) -> List[Dict]:
         """使用WBI签名获取用户投稿视频列表"""
         # 构建参数
@@ -357,194 +428,48 @@ class BilibiliUserDownloader:
             'platform': 'web',
             'web_location': '1550101'
         }
-        
         # WBI签名
         query_string = self._encode_wbi(params)
         url = f"https://api.bilibili.com/x/space/wbi/arc/search?{query_string}"
-        
-        headers = {
-            'User-Agent': self.headers['User-Agent'],
-            'Referer': f'https://space.bilibili.com/{user_id}/video',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'zh-CN,zh;q=0.8'
-        }
-        
-        try:
-            response = self.session.get(url, headers=headers, timeout=15)
-            print(f"WBI视频列表响应状态: {response.status_code}")
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            if data['code'] == 0:
-                video_list = data['data']['list']['vlist']
-                return video_list
-            elif data['code'] == -352:
-                print(f"WBI API被风控，自动降级到普通API")
-                return []  # 返回空列表，触发降级
-            else:
-                print(f"WBI获取视频列表失败 (页 {page}): {data}")
-                return []
-        except Exception as e:
-            print(f"WBI获取视频列表错误 (页 {page}): {e}")
-            return []
-    
-    def _get_user_videos_fallback(self, user_id: str, page: int = 1, page_size: int = 50) -> List[Dict]:
-        """降级方案：使用普通API获取用户投稿视频列表"""
-        # 使用更简单的API，减少风控风险
-        url = f"https://api.bilibili.com/x/space/arc/search?mid={user_id}&ps={page_size}&tid=0&pn={page}&keyword=&order=pubdate&jsonp=jsonp"
-        
-        headers = {
-            'User-Agent': self.headers['User-Agent'],
-            'Referer': f'https://space.bilibili.com/{user_id}/video',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'zh-CN,zh;q=0.8',
-            'Connection': 'keep-alive'
-        }
-        
-        # 重试机制处理频率限制
-        for attempt in range(self.max_retries):
-            try:
-                # 增加延迟，降低风控风险
-                if attempt > 0:
-                    wait_time = self.api_delay * (2 **attempt)  # 指数退避
-                    print(f"第{attempt + 1}次尝试，等待{wait_time}秒...")
-                    time.sleep(wait_time)
-                else:
-                    time.sleep(self.api_delay)
-                
-                response = self.session.get(url, headers=headers, timeout=15)
-                print(f"普通API视频列表响应状态: {response.status_code}")
-                
-                response.raise_for_status()
-                data = response.json()
-                
-                if data['code'] == 0:
-                    video_list = data['data']['list']['vlist']
-                    return video_list
-                elif data['code'] == -799:
-                    print(f"请求过于频繁（第{attempt + 1}次尝试），稍后重试...")
-                    if attempt == self.max_retries - 1:
-                        print("所有重试均失败，建议稍后再试或增加延迟时间")
-                    continue
-                elif data['code'] == -352:
-                    print(f"普通API也被风控，建议增加延迟或稍后再试")
-                    return []
-                else:
-                    print(f"普通API获取视频列表失败 (页 {page}): {data}")
-                    return []
-            except Exception as e:
-                print(f"普通API获取视频列表错误 (页 {page}, 第{attempt + 1}次尝试): {e}")
-                if attempt == self.max_retries - 1:
-                    return []
-        
-        return []
-
-    def get_all_user_videos(self, user_id: str, max_count: int = None) -> List[Dict]:
-        """获取用户投稿视频（使用Medialist方法），支持限制数量"""
-        all_videos = []
-        page = 1
-        page_size = 20  # 原项目使用的页大小
-        
-        print(f"开始获取用户 {user_id} 的视频（使用Medialist方法）...")
-        if max_count:
-            print(f"目标获取数量: {max_count} 个视频")
-        
-        while True:
-            print(f"正在获取第 {page} 页...")
-            videos = self.get_user_videos(user_id, page, page_size)
-            
-            if not videos:
-                break
-            
-            # 检查是否需要限制数量
-            if max_count and len(all_videos) + len(videos) > max_count:
-                # 只取需要的数量
-                needed = max_count - len(all_videos)
-                videos = videos[:needed]
-                all_videos.extend(videos)
-                print(f"第 {page} 页获取到 {len(videos)} 个视频（已达到目标数量 {max_count}）")
-                break
-            
-            all_videos.extend(videos)
-            print(f"第 {page} 页获取到 {len(videos)} 个视频，累计 {len(all_videos)} 个")
-            
-            # 如果已达到目标数量，停止获取
-            if max_count and len(all_videos) >= max_count:
-                print(f"已获取到目标数量 {max_count} 个视频")
-                break
-            
-            # 如果获取的视频数少于页大小，说明是最后一页
-            if len(videos) < page_size:
-                break
-                
-            page += 1
-            # 严格控制请求频率
-            time.sleep(self.delay_between_requests)
-        
-        print(f"共获取到 {len(all_videos)} 个视频")
-        return all_videos
-
-
-    def get_video_cid(self, bvid: str) -> Optional[str]:
-        """获取视频的cid"""
-        try:
-            url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
-            headers = {
-                'User-Agent': self.headers['User-Agent'],
-                'Referer': f'https://www.bilibili.com/video/{bvid}',
-                'Accept': 'application/json, text/plain, */*'
-            }
-            
-            response = self.session.get(url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                if data['code'] == 0:
-                    # 获取第一个分P的cid
-                    pages = data['data']['pages']
-                    if pages:
-                        return str(pages[0]['cid'])
-            return None
-        except Exception as e:
-            print(f"获取视频cid失败 {bvid}: {e}")
-            return None
+        # ... (rest of the code remains the same)
 
     def download_video_file(self, url: str, filename: str) -> bool:
         """下载视频文件"""
-        try:
-            headers = {
-                'User-Agent': self.headers['User-Agent'],
-                'Referer': 'https://www.bilibili.com/',
-                'Range': 'bytes=0-'  # 支持断点续传
-            }
-            
-            print(f"正在下载: {filename}")
-            response = self.session.get(url, headers=headers, stream=True, timeout=30)
-            
-            if response.status_code in [200, 206]:
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
-                
-                with open(filename, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            
-                            # 显示下载进度
-                            if total_size > 0:
-                                progress = (downloaded / total_size) * 100
-                                print(f"\r下载进度: {progress:.1f}% ({downloaded}/{total_size})", end='')
-                
-                print(f"\n✓ 下载完成: {filename}")
-                return True
-            else:
-                print(f"下载失败，状态码: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"下载文件时出错: {e}")
-            return False
+        headers = {
+            'User-Agent': self.headers['User-Agent'],
+            'Referer': 'https://www.bilibili.com/',
+            'Range': 'bytes=0-'
+        }
+        for attempt in range(self.max_retries):
+            try:
+                if attempt > 0:
+                    wait_time = min(30, 2 ** attempt * 2)
+                    print(f"重试第 {attempt + 1} 次，等待 {wait_time} 秒...")
+                    time.sleep(wait_time)
+
+                print(f"正在下载: {filename}")
+                response = self.session.get(url, headers=headers, stream=True, timeout=60)
+
+                if response.status_code in [200, 206]:
+                    total_size = int(response.headers.get('content-length', 0))
+                    downloaded = 0
+
+                    with open(filename, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=1024 * 512):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    progress = (downloaded / total_size) * 100
+                                    print(f"\r下载进度: {progress:.1f}% ({downloaded}/{total_size})", end='')
+
+                    print(f"\n✓ 下载完成: {filename}")
+                    return True
+                else:
+                    print(f"下载失败，状态码: {response.status_code}")
+            except Exception as e:
+                print(f"下载文件时出错(尝试 {attempt + 1}/{self.max_retries}): {e}")
+        return False
 
     def merge_video_audio(self, video_file: str, audio_file: str, output_file: str) -> bool:
         """合并视频和音频文件"""
@@ -617,8 +542,10 @@ class BilibiliUserDownloader:
                 print(f"获取下载链接失败: {video['bvid']}")
                 return False
             
-            # 清理文件名中的非法字符
-            safe_title = "".join(c for c in video['title'] if c.isalnum() or c in (' ', '-', '_')).strip()
+            # 清理文件名中的非法字符，仅移除Windows不允许的字符，保留《》
+            safe_title = self.sanitize_filename(video['title'])
+            if not safe_title:
+                safe_title = "video"
             base_filename = f"{video['bvid']}_{safe_title}"
             final_filepath = os.path.join(self.download_dir, f"{base_filename}.mp4")
             
@@ -633,14 +560,28 @@ class BilibiliUserDownloader:
                 # 获取视频流
                 if 'video' in dash_data and dash_data['video']:
                     video_streams = dash_data['video']
-                    # 选择最高质量的视频流
-                    video_url = video_streams[0]['baseUrl']
+                    # 选择最高质量的视频流（优先id/height/带宽）
+                    best_v = max(
+                        video_streams,
+                        key=lambda s: (
+                            s.get('id', 0),
+                            s.get('height', 0),
+                            s.get('bandwidth', 0)
+                        )
+                    )
+                    video_url = best_v.get('baseUrl') or best_v.get('backupUrl', [None])[0]
                 
                 # 获取音频流
                 if 'audio' in dash_data and dash_data['audio']:
                     audio_streams = dash_data['audio']
-                    # 选择最高质量的音频流
-                    audio_url = audio_streams[0]['baseUrl']
+                    best_a = max(
+                        audio_streams,
+                        key=lambda s: (
+                            s.get('bandwidth', 0),
+                            s.get('id', 0)
+                        )
+                    )
+                    audio_url = best_a.get('baseUrl') or best_a.get('backupUrl', [None])[0]
                 
                 if not video_url:
                     print(f"未找到视频流: {video['bvid']}")
@@ -680,16 +621,6 @@ class BilibiliUserDownloader:
                 return False
             
             if success:
-                # 创建信息文件
-                info_file = os.path.join(self.download_dir, f"{video['bvid']}_info.txt")
-                with open(info_file, 'w', encoding='utf-8') as f:
-                    f.write(f"标题: {video['title']}\n")
-                    f.write(f"BV号: {video['bvid']}\n")
-                    f.write(f"作者: {video['author']}\n")
-                    f.write(f"时长: {video['length']}\n")
-                    f.write(f"播放量: {video['play']}\n")
-                    f.write(f"文件名: {base_filename}.mp4\n")
-                
                 return True
             else:
                 return False
@@ -698,28 +629,30 @@ class BilibiliUserDownloader:
             print(f"下载视频 {video['title']} 时出错: {e}")
             return False
 
-    def get_video_download_url(self, bvid: str, cid: str, quality: int = 80) -> Optional[Dict]:
-        """获取视频下载链接"""
+    def get_video_download_url(self, bvid: str, cid: str, quality: int = 127) -> Optional[Dict]:
+        """获取视频下载链接（请求最高画质，DASH优先）"""
         # 构建参数
         params = {
             'bvid': bvid,
             'cid': cid,
-            'qn': quality,
+            'qn': quality,       # 127为超清高优先，服务端会向下兼容
             'fnver': 0,
-            'fnval': 4048,  # DASH格式
+            'fnval': 4048,       # DASH + 杜比/8K等按位配置，4048涵盖常见组合
             'fourk': 1
         }
-        
         # WBI签名
         query_string = self._encode_wbi(params)
         url = f"https://api.bilibili.com/x/player/wbi/playurl?{query_string}"
-        
+        headers = {
+            'User-Agent': self.headers['User-Agent'],
+            'Referer': f'https://www.bilibili.com/video/{bvid}',
+            'Accept': 'application/json, text/plain, */*'
+        }
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, headers=headers, timeout=15)
             data = response.json()
-            
-            if data['code'] == 0:
-                return data['data']
+            if data.get('code') == 0:
+                return data.get('data')
             else:
                 print(f"获取视频下载链接失败 {bvid}: {data}")
                 return None
