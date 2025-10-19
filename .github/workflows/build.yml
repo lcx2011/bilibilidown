@@ -1,0 +1,68 @@
+name: Build Windows EXE (PyInstaller, Python 3.8, x86/x64)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, x64]
+    env:
+      PY_VER: '3.8'
+      # 可根据需要替换为更稳定的地址。当前为 64 位静态版（两种架构都用该包也能在 64 位系统上运行）。
+      FFMPEG_ZIP_URL: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ env.PY_VER }} (${{ matrix.arch }})
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VER }}
+          architecture: ${{ matrix.arch }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          # 如需其它依赖，在此追加：pip install -r requirements.txt
+
+      - name: Prepare ffmpeg binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path ffmpeg\bin | Out-Null
+          Invoke-WebRequest -Uri "${{ env.FFMPEG_ZIP_URL }}" -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpegtmp -Force
+          # 在解压目录中查找 ffmpeg.exe 和 ffprobe.exe 并复制到 ffmpeg\bin\ 下
+          $ffmpegExe = Get-ChildItem -Recurse -Path ffmpegtmp -Filter ffmpeg.exe | Select-Object -First 1
+          $ffprobeExe = Get-ChildItem -Recurse -Path ffmpegtmp -Filter ffprobe.exe | Select-Object -First 1
+          if (-not $ffmpegExe -or -not $ffprobeExe) { throw 'ffmpeg.exe 或 ffprobe.exe 未找到，请检查下载包结构或更换 URL' }
+          Copy-Item $ffmpegExe.FullName -Destination ffmpeg\bin\ffmpeg.exe -Force
+          Copy-Item $ffprobeExe.FullName -Destination ffmpeg\bin\ffprobe.exe -Force
+          Write-Host "Copied:" (Get-Item ffmpeg\bin\ffmpeg.exe).FullName
+          Write-Host "Copied:" (Get-Item ffmpeg\bin\ffprobe.exe).FullName
+
+      - name: Build EXE with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller --onefile `
+            --name BiliMusic-${{ matrix.arch }}-py${{ env.PY_VER }} `
+            --runtime-hook hooks\rthook_meipass_path.py `
+            --add-binary "ffmpeg\bin\ffmpeg.exe;." `
+            --add-binary "ffmpeg\bin\ffprobe.exe;." `
+            2.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BiliMusic-${{ matrix.arch }}-py${{ env.PY_VER }}
+          path: |
+            dist\BiliMusic-${{ matrix.arch }}-py${{ env.PY_VER }}.exe
+            BiliMusic.spec
