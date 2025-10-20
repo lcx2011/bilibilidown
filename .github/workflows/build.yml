@@ -15,8 +15,6 @@ jobs:
         arch: [x86, x64]
     env:
       PY_VER: '3.8'
-      # 可根据需要替换为更稳定的地址。当前为 64 位静态版（两种架构都用该包也能在 64 位系统上运行）。
-      FFMPEG_ZIP_URL: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,19 +31,33 @@ jobs:
           pip install pyinstaller
           # 如需其它依赖，在此追加：pip install -r requirements.txt
 
-      - name: Prepare ffmpeg binaries
+      - name: Prepare ffmpeg binaries (x64)
+        if: matrix.arch == 'x64'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          choco install ffmpeg -y
           New-Item -ItemType Directory -Force -Path ffmpeg\bin | Out-Null
-          Invoke-WebRequest -Uri "${{ env.FFMPEG_ZIP_URL }}" -OutFile ffmpeg.zip
-          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpegtmp -Force
-          # 在解压目录中查找 ffmpeg.exe 和 ffprobe.exe 并复制到 ffmpeg\bin\ 下
-          $ffmpegExe = Get-ChildItem -Recurse -Path ffmpegtmp -Filter ffmpeg.exe | Select-Object -First 1
-          $ffprobeExe = Get-ChildItem -Recurse -Path ffmpegtmp -Filter ffprobe.exe | Select-Object -First 1
-          if (-not $ffmpegExe -or -not $ffprobeExe) { throw 'ffmpeg.exe 或 ffprobe.exe 未找到，请检查下载包结构或更换 URL' }
-          Copy-Item $ffmpegExe.FullName -Destination ffmpeg\bin\ffmpeg.exe -Force
-          Copy-Item $ffprobeExe.FullName -Destination ffmpeg\bin\ffprobe.exe -Force
+          $ff = Get-Command ffmpeg.exe | Select-Object -First 1
+          $fp = Get-Command ffprobe.exe | Select-Object -First 1
+          if (-not $ff -or -not $fp) { throw '未找到 ffmpeg/ffprobe（x64）' }
+          Copy-Item $ff.Source -Destination ffmpeg\bin\ffmpeg.exe -Force
+          Copy-Item $fp.Source -Destination ffmpeg\bin\ffprobe.exe -Force
+          Write-Host "Copied:" (Get-Item ffmpeg\bin\ffmpeg.exe).FullName
+          Write-Host "Copied:" (Get-Item ffmpeg\bin\ffprobe.exe).FullName
+
+      - name: Prepare ffmpeg binaries (x86)
+        if: matrix.arch == 'x86'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install ffmpeg -y --x86
+          New-Item -ItemType Directory -Force -Path ffmpeg\bin | Out-Null
+          $ff = Get-Command ffmpeg.exe | Select-Object -First 1
+          $fp = Get-Command ffprobe.exe | Select-Object -First 1
+          if (-not $ff -or -not $fp) { throw '未找到 ffmpeg/ffprobe（x86）' }
+          Copy-Item $ff.Source -Destination ffmpeg\bin\ffmpeg.exe -Force
+          Copy-Item $fp.Source -Destination ffmpeg\bin\ffprobe.exe -Force
           Write-Host "Copied:" (Get-Item ffmpeg\bin\ffmpeg.exe).FullName
           Write-Host "Copied:" (Get-Item ffmpeg\bin\ffprobe.exe).FullName
 
